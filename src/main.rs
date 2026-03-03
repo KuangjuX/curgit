@@ -31,11 +31,11 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
-    /// Force auto-split mode for large diffs
+    /// Force semantic auto-split mode (prompt-based)
     #[arg(long)]
     split: bool,
 
-    /// Disable auto-split even for large diffs
+    /// Disable semantic auto-split; generate a single commit message
     #[arg(long)]
     no_split: bool,
 
@@ -83,13 +83,7 @@ async fn run() -> Result<()> {
         config.provider, config.model
     ));
 
-    let use_split = if args.split {
-        true
-    } else if args.no_split {
-        false
-    } else {
-        split::should_suggest_split(&diff)
-    };
+    let use_split = args.split || !args.no_split;
 
     if use_split {
         return run_split_flow(&args, &config, &diff, &formatted_diff).await;
@@ -140,17 +134,19 @@ async fn run_split_flow(
     diff: &git::StagedDiff,
     formatted_diff: &str,
 ) -> Result<()> {
+    let staged_patch = split::parse_staged_patch()?;
     cli::print_info(&format!(
-        "Large diff detected ({} files). Generating split plan...",
-        diff.files.len()
+        "Generating semantic split plan from {} files / {} hunks...",
+        diff.files.len(),
+        staged_patch.hunks.len()
     ));
 
     let spinner = cli::create_spinner("Analyzing diff and generating split plan...");
     let mut groups =
-        split::generate_split_plan(config, diff, formatted_diff, &args.lang).await?;
+        split::generate_split_plan(config, diff, formatted_diff, &staged_patch, &args.lang).await?;
     spinner.finish_and_clear();
 
-    let warnings = split::validate_split_plan(&groups, diff);
+    let warnings = split::validate_split_plan(&groups, diff, &staged_patch);
     for w in &warnings {
         cli::print_warning(w);
     }
@@ -163,7 +159,7 @@ async fn run_split_flow(
 
     match cli::prompt_split_flow(&mut groups)? {
         cli::SplitAction::Proceed => {
-            split::execute_split_plan(&groups, &diff.files)?;
+            split::execute_split_plan(&groups, &staged_patch)?;
             cli::print_success(&format!(
                 "All {} commits created successfully!",
                 groups.len()
