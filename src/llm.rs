@@ -155,7 +155,11 @@ impl LlmConfig {
 
         let provider = cli_provider
             .map(|s| Provider::from_str(s))
-            .or_else(|| std::env::var("CURGIT_PROVIDER").ok().map(|s| Provider::from_str(&s)))
+            .or_else(|| {
+                std::env::var("CURGIT_PROVIDER")
+                    .ok()
+                    .map(|s| Provider::from_str(&s))
+            })
             .or_else(|| {
                 file_config
                     .as_ref()
@@ -196,12 +200,7 @@ impl LlmConfig {
                 }
             })
             .or_else(|| file_provider_cfg.as_ref().and_then(|c| c.api_base.clone()))
-            .or_else(|| {
-                file_config
-                    .as_ref()
-                    .ok()
-                    .and_then(|c| c.api_base.clone())
-            })
+            .or_else(|| file_config.as_ref().ok().and_then(|c| c.api_base.clone()))
             .unwrap_or_else(|| provider.default_base_url().to_string());
 
         let model = cli_model
@@ -209,12 +208,7 @@ impl LlmConfig {
             .or_else(|| std::env::var(format!("CURGIT_{provider_env}_MODEL")).ok())
             .or_else(|| std::env::var("CURGIT_MODEL").ok())
             .or_else(|| file_provider_cfg.as_ref().and_then(|c| c.model.clone()))
-            .or_else(|| {
-                file_config
-                    .as_ref()
-                    .ok()
-                    .and_then(|c| c.model.clone())
-            })
+            .or_else(|| file_config.as_ref().ok().and_then(|c| c.model.clone()))
             .unwrap_or_else(|| provider.default_model().to_string());
 
         if provider.requires_api_key() && api_key.is_none() {
@@ -421,10 +415,7 @@ async fn call_openai_compatible(
     user_prompt: &str,
 ) -> Result<String> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "{}/chat/completions",
-        config.api_base.trim_end_matches('/')
-    );
+    let url = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
 
     let request = ChatRequest {
         model: config.model.clone(),
@@ -479,10 +470,7 @@ async fn call_anthropic(
     user_prompt: &str,
 ) -> Result<String> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "{}/v1/messages",
-        config.api_base.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/messages", config.api_base.trim_end_matches('/'));
 
     let api_key = config
         .api_key

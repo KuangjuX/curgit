@@ -28,7 +28,7 @@ pub fn build_system_prompt(language: Language, cursorrules: Option<&str>) -> Str
         .unwrap_or_default();
 
     format!(
-r#"You are curgit, an expert Git commit message generator. You analyze staged diffs and produce professional, concise commit messages following the Conventional Commits specification.
+        r#"You are curgit, an expert Git commit message generator. You analyze staged diffs and produce professional, concise commit messages following the Conventional Commits specification.
 
 ## Output Format
 
@@ -72,7 +72,8 @@ fix(api): resolve race condition in concurrent requests
 - Increase connection timeout to 30s
 - Add retry logic for transient failures
 ```
-"#)
+"#
+    )
 }
 
 pub fn build_user_prompt(diff: &StagedDiff, formatted_diff: &str) -> String {

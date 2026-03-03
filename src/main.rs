@@ -9,7 +9,11 @@ use clap::Parser;
 use std::process::Command;
 
 #[derive(Parser)]
-#[command(name = "curgit", version, about = "AI-powered Git commit message generator")]
+#[command(
+    name = "curgit",
+    version,
+    about = "AI-powered Git commit message generator"
+)]
 struct Args {
     /// Language for the commit message (en, zh)
     #[arg(short, long, default_value = "en")]
@@ -95,8 +99,7 @@ async fn run() -> Result<()> {
 
     loop {
         let spinner = cli::create_spinner("Generating commit message...");
-        let message =
-            llm::generate_commit_message(&config, &system_prompt, &user_prompt).await?;
+        let message = llm::generate_commit_message(&config, &system_prompt, &user_prompt).await?;
         spinner.finish_and_clear();
 
         if args.dry_run {

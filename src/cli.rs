@@ -143,9 +143,7 @@ pub fn prompt_split_flow(groups: &mut Vec<crate::split::CommitGroup>) -> Result<
     loop {
         crate::split::display_split_plan(groups);
 
-        let mut items = vec![
-            "✅ Proceed — execute all commits in order".to_string(),
-        ];
+        let mut items = vec!["✅ Proceed — execute all commits in order".to_string()];
         for (i, group) in groups.iter().enumerate() {
             let subject = group.message.lines().next().unwrap_or("(empty)");
             items.push(format!("✏️  Edit commit {} — {}", i + 1, subject));

@@ -46,27 +46,48 @@ impl StagedDiff {
     }
 
     pub fn summary(&self) -> String {
-        let added = self.files.iter().filter(|f| matches!(f.status, ChangeStatus::Added)).count();
-        let modified = self.files.iter().filter(|f| matches!(f.status, ChangeStatus::Modified)).count();
-        let deleted = self.files.iter().filter(|f| matches!(f.status, ChangeStatus::Deleted)).count();
-        let renamed = self.files.iter().filter(|f| matches!(f.status, ChangeStatus::Renamed(_))).count();
+        let added = self
+            .files
+            .iter()
+            .filter(|f| matches!(f.status, ChangeStatus::Added))
+            .count();
+        let modified = self
+            .files
+            .iter()
+            .filter(|f| matches!(f.status, ChangeStatus::Modified))
+            .count();
+        let deleted = self
+            .files
+            .iter()
+            .filter(|f| matches!(f.status, ChangeStatus::Deleted))
+            .count();
+        let renamed = self
+            .files
+            .iter()
+            .filter(|f| matches!(f.status, ChangeStatus::Renamed(_)))
+            .count();
 
         let mut parts = Vec::new();
-        if added > 0 { parts.push(format!("{added} added")); }
-        if modified > 0 { parts.push(format!("{modified} modified")); }
-        if deleted > 0 { parts.push(format!("{deleted} deleted")); }
-        if renamed > 0 { parts.push(format!("{renamed} renamed")); }
+        if added > 0 {
+            parts.push(format!("{added} added"));
+        }
+        if modified > 0 {
+            parts.push(format!("{modified} modified"));
+        }
+        if deleted > 0 {
+            parts.push(format!("{deleted} deleted"));
+        }
+        if renamed > 0 {
+            parts.push(format!("{renamed} renamed"));
+        }
         parts.join(", ")
     }
 }
 
 const IGNORED_EXTENSIONS: &[&str] = &[
-    "lock", "sum", "min.js", "min.css", "map",
-    "png", "jpg", "jpeg", "gif", "ico", "svg", "webp",
-    "woff", "woff2", "ttf", "eot",
-    "zip", "tar", "gz", "bz2",
-    "exe", "dll", "so", "dylib",
-    "pdf", "doc", "docx",
+    "lock", "sum", "min.js", "min.css", "map", "png", "jpg", "jpeg", "gif", "ico", "svg", "webp",
+    "woff", "woff2", "ttf", "eot", "zip", "tar", "gz", "bz2", "exe", "dll", "so", "dylib", "pdf",
+    "doc", "docx",
 ];
 
 const IGNORED_FILES: &[&str] = &[
