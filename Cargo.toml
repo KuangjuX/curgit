@@ -1,0 +1,25 @@
+[package]
+name = "curgit"
+version = "0.1.0"
+edition = "2021"
+description = "A high-performance Git Agent CLI that generates Conventional Commits messages using LLM"
+license = "MIT"
+
+[dependencies]
+git2 = "0.19"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+dialoguer = "0.11"
+anyhow = "1"
+colored = "2"
+dirs = "5"
+toml = "0.8"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
