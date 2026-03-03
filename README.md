@@ -146,19 +146,21 @@ curgit --provider ollama
 
 ```bash
 # OpenAI
-export CURGIT_API_KEY="sk-..."
+export CURGIT_OPENAI_API_KEY="sk-..."
+export CURGIT_OPENAI_MODEL="gpt-4o-mini"
 curgit --provider openai
 
 # Claude
-export CURGIT_API_KEY="sk-ant-..."
+export CURGIT_CLAUDE_API_KEY="sk-ant-..."
+export CURGIT_CLAUDE_MODEL="claude-sonnet-4-20250514"
 curgit --provider claude
 
 # Kimi
-export CURGIT_API_KEY="sk-..."
+export CURGIT_KIMI_API_KEY="sk-..."
 curgit --provider kimi
 
 # DeepSeek
-export CURGIT_API_KEY="sk-..."
+export CURGIT_DEEPSEEK_API_KEY="sk-..."
 curgit --provider deepseek
 ```
 
@@ -173,6 +175,15 @@ provider = "cursor"
 # model = "gpt-4o-mini"
 # api_key = "sk-..."
 # api_base = "https://api.openai.com/v1"
+
+# Provider-specific overrides (recommended when using multiple providers)
+[providers.openai]
+api_key = "sk-openai-..."
+model = "gpt-4o-mini"
+
+[providers.claude]
+api_key = "sk-ant-..."
+model = "claude-sonnet-4-20250514"
 ```
 
 ### Environment Variables
@@ -180,6 +191,9 @@ provider = "cursor"
 | Variable | Description |
 |---|---|
 | `CURGIT_PROVIDER` | Default provider (`cursor`, `ollama`, `openai`, `claude`, `kimi`, `deepseek`, `custom`) |
+| `CURGIT_<PROVIDER>_API_KEY` | Provider-specific API key, e.g. `CURGIT_OPENAI_API_KEY` |
+| `CURGIT_<PROVIDER>_API_BASE` | Provider-specific API base URL, e.g. `CURGIT_CUSTOM_API_BASE` |
+| `CURGIT_<PROVIDER>_MODEL` | Provider-specific model, e.g. `CURGIT_CLAUDE_MODEL` |
 | `CURGIT_API_KEY` or `OPENAI_API_KEY` | API key for cloud providers |
 | `CURGIT_API_BASE` or `OPENAI_API_BASE` | Override API base URL |
 | `CURGIT_MODEL` | Override model name |
@@ -189,9 +203,10 @@ provider = "cursor"
 Configuration is resolved in this order (highest to lowest):
 
 1. CLI arguments (`--provider`, `--model`, `--api-base`)
-2. Environment variables (`CURGIT_PROVIDER`, `CURGIT_API_KEY`, etc.)
-3. Config file (`~/.config/curgit/config.toml`)
-4. Provider defaults
+2. Provider-specific environment variables (`CURGIT_OPENAI_API_KEY`, etc.)
+3. Global environment variables (`CURGIT_API_KEY`, etc.)
+4. Config file (`~/.config/curgit/config.toml`, including `[providers.<name>]`)
+5. Provider defaults
 
 ## Usage
 
