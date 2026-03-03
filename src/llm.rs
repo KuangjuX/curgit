@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-const CURSOR_CLI_PATH: &str = "/Applications/Cursor.app/Contents/Resources/app/bin/cursor";
+const CURSOR_CLI_FALLBACK_PATH: &str = "/Applications/Cursor.app/Contents/Resources/app/bin/cursor";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -108,6 +108,40 @@ pub struct ConfigFile {
     pub api_key: Option<String>,
     pub api_base: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub providers: ProviderOverrides,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ProviderOverrides {
+    pub cursor: Option<ProviderConfig>,
+    pub ollama: Option<ProviderConfig>,
+    pub openai: Option<ProviderConfig>,
+    pub claude: Option<ProviderConfig>,
+    pub kimi: Option<ProviderConfig>,
+    pub deepseek: Option<ProviderConfig>,
+    pub custom: Option<ProviderConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderConfig {
+    pub api_key: Option<String>,
+    pub api_base: Option<String>,
+    pub model: Option<String>,
+}
+
+impl ConfigFile {
+    fn provider_config(&self, provider: &Provider) -> Option<&ProviderConfig> {
+        match provider {
+            Provider::Cursor => self.providers.cursor.as_ref(),
+            Provider::Ollama => self.providers.ollama.as_ref(),
+            Provider::OpenAI => self.providers.openai.as_ref(),
+            Provider::Claude => self.providers.claude.as_ref(),
+            Provider::Kimi => self.providers.kimi.as_ref(),
+            Provider::DeepSeek => self.providers.deepseek.as_ref(),
+            Provider::Custom => self.providers.custom.as_ref(),
+        }
+    }
 }
 
 impl LlmConfig {
@@ -131,23 +165,37 @@ impl LlmConfig {
             })
             .unwrap_or(Ok(Provider::Cursor))?;
 
-        let api_key = cli_api_base
-            .is_none() // don't use this branch for api_key, just check env/file
-            .then(|| None)
-            .unwrap_or(None)
+        let provider_env = provider.env_prefix();
+        let file_provider_cfg = file_config
+            .as_ref()
+            .ok()
+            .and_then(|c| c.provider_config(&provider).cloned());
+
+        let api_key = std::env::var(format!("CURGIT_{provider_env}_API_KEY"))
+            .ok()
             .or_else(|| std::env::var("CURGIT_API_KEY").ok())
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .or_else(|| {
-                file_config
-                    .as_ref()
-                    .ok()
-                    .and_then(|c| c.api_key.clone())
-            });
+                if matches!(provider, Provider::OpenAI) {
+                    std::env::var("OPENAI_API_KEY").ok()
+                } else {
+                    None
+                }
+            })
+            .or_else(|| file_provider_cfg.as_ref().and_then(|c| c.api_key.clone()))
+            .or_else(|| file_config.as_ref().ok().and_then(|c| c.api_key.clone()));
 
         let api_base = cli_api_base
             .map(|s| s.to_string())
+            .or_else(|| std::env::var(format!("CURGIT_{provider_env}_API_BASE")).ok())
             .or_else(|| std::env::var("CURGIT_API_BASE").ok())
-            .or_else(|| std::env::var("OPENAI_API_BASE").ok())
+            .or_else(|| {
+                if matches!(provider, Provider::OpenAI) {
+                    std::env::var("OPENAI_API_BASE").ok()
+                } else {
+                    None
+                }
+            })
+            .or_else(|| file_provider_cfg.as_ref().and_then(|c| c.api_base.clone()))
             .or_else(|| {
                 file_config
                     .as_ref()
@@ -158,7 +206,9 @@ impl LlmConfig {
 
         let model = cli_model
             .map(|s| s.to_string())
+            .or_else(|| std::env::var(format!("CURGIT_{provider_env}_MODEL")).ok())
             .or_else(|| std::env::var("CURGIT_MODEL").ok())
+            .or_else(|| file_provider_cfg.as_ref().and_then(|c| c.model.clone()))
             .or_else(|| {
                 file_config
                     .as_ref()
@@ -171,9 +221,13 @@ impl LlmConfig {
             bail!(
                 "Provider '{}' requires an API key.\n\
                  Set it via:\n  \
+                 - CURGIT_{}_API_KEY environment variable\n  \
                  - CURGIT_API_KEY environment variable\n  \
                  - 'api_key' in ~/.config/curgit/config.toml\n  \
+                 - '[providers.{}].api_key' in ~/.config/curgit/config.toml\n  \
                  - Or switch to 'cursor' (default) or 'ollama' for local inference (no key needed)",
+                provider,
+                provider_env,
                 provider
             );
         }
@@ -204,6 +258,20 @@ impl LlmConfig {
 
     pub fn config_file_path() -> Option<std::path::PathBuf> {
         dirs::config_dir().map(|d| d.join("curgit").join("config.toml"))
+    }
+}
+
+impl Provider {
+    fn env_prefix(&self) -> &'static str {
+        match self {
+            Provider::Cursor => "CURSOR",
+            Provider::Ollama => "OLLAMA",
+            Provider::OpenAI => "OPENAI",
+            Provider::Claude => "CLAUDE",
+            Provider::Kimi => "KIMI",
+            Provider::DeepSeek => "DEEPSEEK",
+            Provider::Custom => "CUSTOM",
+        }
     }
 }
 
@@ -324,12 +392,7 @@ async fn call_cursor_cli(system_prompt: &str, user_prompt: &str) -> Result<Strin
 }
 
 fn find_cursor_cli() -> Result<String> {
-    let path = std::path::Path::new(CURSOR_CLI_PATH);
-    if path.exists() {
-        return Ok(CURSOR_CLI_PATH.to_string());
-    }
-
-    // Fallback: try finding `cursor` in PATH
+    // Prefer auto-discovery from PATH first.
     if let Ok(output) = std::process::Command::new("which").arg("cursor").output() {
         if output.status.success() {
             let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -339,8 +402,14 @@ fn find_cursor_cli() -> Result<String> {
         }
     }
 
+    // Fallback: fixed macOS installation path.
+    let path = std::path::Path::new(CURSOR_CLI_FALLBACK_PATH);
+    if path.exists() {
+        return Ok(CURSOR_CLI_FALLBACK_PATH.to_string());
+    }
+
     bail!(
-        "Cursor CLI not found at '{CURSOR_CLI_PATH}' or in PATH.\n\
+        "Cursor CLI not found in PATH or at fallback path '{CURSOR_CLI_FALLBACK_PATH}'.\n\
          Install Cursor from https://cursor.sh or switch to another provider:\n  \
          curgit --provider ollama"
     );
