@@ -83,7 +83,6 @@ async fn run() -> Result<()> {
         config.provider, config.model
     ));
 
-    // Decide whether to split
     let use_split = if args.split {
         true
     } else if args.no_split {
@@ -96,50 +95,43 @@ async fn run() -> Result<()> {
         return run_split_flow(&args, &config, &diff, &formatted_diff).await;
     }
 
-    // Normal single-commit flow
+    // Normal single-commit flow with regeneration support
     let system_prompt = prompt::build_system_prompt(language, cursorrules.as_deref());
     let user_prompt = prompt::build_user_prompt(&diff, &formatted_diff);
 
-    let spinner = cli::create_spinner("Generating commit message...");
-    let message = llm::generate_commit_message(&config, &system_prompt, &user_prompt).await?;
-    spinner.finish_and_clear();
+    loop {
+        let spinner = cli::create_spinner("Generating commit message...");
+        let message =
+            llm::generate_commit_message(&config, &system_prompt, &user_prompt).await?;
+        spinner.finish_and_clear();
 
-    cli::display_commit_message(&message);
+        if args.dry_run {
+            cli::display_commit_message(&message);
+            cli::print_info("Dry run — no commit created.");
+            return Ok(());
+        }
 
-    if args.dry_run {
-        cli::print_info("Dry run — no commit created.");
-        return Ok(());
-    }
+        // prompt_commit_flow returns Some(msg) to commit, None to regenerate
+        match cli::prompt_commit_flow(&message)? {
+            Some(final_message) => {
+                let status = Command::new("git")
+                    .args(["commit", "-m", &final_message])
+                    .status()?;
 
-    let final_message = loop {
-        match cli::prompt_user_action(&message)? {
-            cli::UserAction::Commit => break message.clone(),
-            cli::UserAction::Edit(edited) => {
-                if edited.trim().is_empty() {
-                    cli::print_warning("Commit message cannot be empty.");
-                    continue;
+                if status.success() {
+                    cli::print_success("Commit created successfully!");
+                } else {
+                    cli::print_error("git commit failed.");
+                    std::process::exit(1);
                 }
-                break edited;
-            }
-            cli::UserAction::Cancel => {
-                cli::print_info("Commit cancelled.");
                 return Ok(());
             }
+            None => {
+                cli::print_info("Regenerating commit message...");
+                continue;
+            }
         }
-    };
-
-    let status = Command::new("git")
-        .args(["commit", "-m", &final_message])
-        .status()?;
-
-    if status.success() {
-        cli::print_success("Commit created successfully!");
-    } else {
-        cli::print_error("git commit failed.");
-        std::process::exit(1);
     }
-
-    Ok(())
 }
 
 async fn run_split_flow(
@@ -154,23 +146,22 @@ async fn run_split_flow(
     ));
 
     let spinner = cli::create_spinner("Analyzing diff and generating split plan...");
-    let groups = split::generate_split_plan(config, diff, formatted_diff, &args.lang).await?;
+    let mut groups =
+        split::generate_split_plan(config, diff, formatted_diff, &args.lang).await?;
     spinner.finish_and_clear();
 
-    // Validate the plan
     let warnings = split::validate_split_plan(&groups, diff);
     for w in &warnings {
         cli::print_warning(w);
     }
 
-    split::display_split_plan(&groups);
-
     if args.dry_run {
+        split::display_split_plan(&groups);
         cli::print_info("Dry run — no commits created.");
         return Ok(());
     }
 
-    match cli::prompt_split_action()? {
+    match cli::prompt_split_flow(&mut groups)? {
         cli::SplitAction::Proceed => {
             split::execute_split_plan(&groups, &diff.files)?;
             cli::print_success(&format!(
