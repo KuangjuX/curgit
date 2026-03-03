@@ -82,6 +82,10 @@ impl StagedDiff {
         }
         parts.join(", ")
     }
+
+    pub fn total_hunks(&self) -> usize {
+        self.files.iter().map(|f| f.hunks.len()).sum()
+    }
 }
 
 const IGNORED_EXTENSIONS: &[&str] = &[

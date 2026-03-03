@@ -5,7 +5,7 @@ mod prompt;
 mod split;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::process::Command;
 
 #[derive(Parser)]
@@ -36,17 +36,58 @@ struct Args {
     dry_run: bool,
 
     /// Force semantic auto-split mode (prompt-based)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_split")]
     split: bool,
 
     /// Disable semantic auto-split; generate a single commit message
-    #[arg(long)]
+    #[arg(long, conflicts_with = "split")]
     no_split: bool,
+
+    /// Split strategy: auto (default), always, never
+    #[arg(long, value_enum)]
+    split_mode: Option<SplitModeArg>,
+
+    /// Auto-split threshold: changed file count
+    #[arg(long)]
+    split_files_threshold: Option<usize>,
+
+    /// Auto-split threshold: hunk count
+    #[arg(long)]
+    split_hunks_threshold: Option<usize>,
+
+    /// Auto-split threshold: formatted diff size (chars)
+    #[arg(long)]
+    split_chars_threshold: Option<usize>,
 
     /// Show current config and exit
     #[arg(long)]
     show_config: bool,
 }
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SplitModeArg {
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SplitMode {
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SplitThresholds {
+    files: usize,
+    hunks: usize,
+    chars: usize,
+}
+
+const DEFAULT_SPLIT_FILES_THRESHOLD: usize = 8;
+const DEFAULT_SPLIT_HUNKS_THRESHOLD: usize = 20;
+const DEFAULT_SPLIT_CHARS_THRESHOLD: usize = 20_000;
 
 #[tokio::main]
 async fn main() {
@@ -87,7 +128,16 @@ async fn run() -> Result<()> {
         config.provider, config.model
     ));
 
-    let use_split = args.split || !args.no_split;
+    let split_mode = resolve_split_mode(&args);
+    let split_thresholds = resolve_split_thresholds(&args);
+    let use_split = should_use_split(split_mode, &diff, &formatted_diff, split_thresholds);
+
+    if matches!(split_mode, SplitMode::Auto) {
+        cli::print_info(&format!(
+            "Split mode: auto (thresholds: {} files / {} hunks / {} chars)",
+            split_thresholds.files, split_thresholds.hunks, split_thresholds.chars
+        ));
+    }
 
     if use_split {
         return run_split_flow(&args, &config, &diff, &formatted_diff).await;
@@ -202,5 +252,74 @@ fn show_config(args: &Args) -> Result<()> {
     if let Some(path) = llm::LlmConfig::config_file_path() {
         println!("  config:    {}", path.display());
     }
+    let split_mode = resolve_split_mode(args);
+    let split_thresholds = resolve_split_thresholds(args);
+    let split_mode_str = match split_mode {
+        SplitMode::Auto => "auto",
+        SplitMode::Always => "always",
+        SplitMode::Never => "never",
+    };
+    println!("  split:     {}", split_mode_str);
+    println!(
+        "  thresholds: files={} hunks={} chars={}",
+        split_thresholds.files, split_thresholds.hunks, split_thresholds.chars
+    );
     Ok(())
+}
+
+fn resolve_split_mode(args: &Args) -> SplitMode {
+    if args.split {
+        return SplitMode::Always;
+    }
+    if args.no_split {
+        return SplitMode::Never;
+    }
+    match args.split_mode.unwrap_or(SplitModeArg::Auto) {
+        SplitModeArg::Auto => SplitMode::Auto,
+        SplitModeArg::Always => SplitMode::Always,
+        SplitModeArg::Never => SplitMode::Never,
+    }
+}
+
+fn resolve_split_thresholds(args: &Args) -> SplitThresholds {
+    SplitThresholds {
+        files: args
+            .split_files_threshold
+            .or_else(|| parse_env_usize("CURGIT_SPLIT_FILES_THRESHOLD"))
+            .unwrap_or(DEFAULT_SPLIT_FILES_THRESHOLD),
+        hunks: args
+            .split_hunks_threshold
+            .or_else(|| parse_env_usize("CURGIT_SPLIT_HUNKS_THRESHOLD"))
+            .unwrap_or(DEFAULT_SPLIT_HUNKS_THRESHOLD),
+        chars: args
+            .split_chars_threshold
+            .or_else(|| parse_env_usize("CURGIT_SPLIT_CHARS_THRESHOLD"))
+            .unwrap_or(DEFAULT_SPLIT_CHARS_THRESHOLD),
+    }
+}
+
+fn parse_env_usize(key: &str) -> Option<usize> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+}
+
+fn should_use_split(
+    split_mode: SplitMode,
+    diff: &git::StagedDiff,
+    formatted_diff: &str,
+    thresholds: SplitThresholds,
+) -> bool {
+    match split_mode {
+        SplitMode::Always => true,
+        SplitMode::Never => false,
+        SplitMode::Auto => {
+            let file_count = diff.files.len();
+            let hunk_count = diff.total_hunks();
+            let diff_chars = formatted_diff.len();
+            file_count >= thresholds.files
+                || hunk_count >= thresholds.hunks
+                || diff_chars >= thresholds.chars
+        }
+    }
 }

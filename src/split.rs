@@ -426,6 +426,26 @@ pub fn validate_split_plan(
 
 /// Execute the split plan: re-stage and commit by hunk/file groups.
 pub fn execute_split_plan(groups: &[CommitGroup], staged_patch: &ParsedStagedPatch) -> Result<()> {
+    let index_tree = snapshot_index_tree()?;
+    let result = execute_split_plan_inner(groups, staged_patch);
+    if let Err(err) = result {
+        match restore_index_tree(&index_tree) {
+            Ok(_) => {
+                bail!(
+                    "{err}\n\nSplit execution failed. Restored staged index to pre-split state."
+                );
+            }
+            Err(restore_err) => {
+                bail!(
+                    "{err}\n\nSplit execution failed and automatic staged-state restore failed: {restore_err}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn execute_split_plan_inner(groups: &[CommitGroup], staged_patch: &ParsedStagedPatch) -> Result<()> {
     let all_paths: Vec<&str> = staged_patch.files.iter().map(|f| f.path.as_str()).collect();
     unstage_files(&all_paths)?;
 
@@ -566,6 +586,33 @@ fn stage_files(files: &[&str]) -> Result<()> {
     let status = cmd.status().context("Failed to stage files")?;
     if !status.success() {
         bail!("git add failed");
+    }
+    Ok(())
+}
+
+fn snapshot_index_tree() -> Result<String> {
+    let output = Command::new("git")
+        .args(["write-tree"])
+        .output()
+        .context("Failed to snapshot current staged index")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git write-tree failed: {stderr}");
+    }
+    let tree = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if tree.is_empty() {
+        bail!("git write-tree returned empty tree id");
+    }
+    Ok(tree)
+}
+
+fn restore_index_tree(tree: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["read-tree", tree])
+        .status()
+        .context("Failed to restore staged index snapshot")?;
+    if !status.success() {
+        bail!("git read-tree failed");
     }
     Ok(())
 }

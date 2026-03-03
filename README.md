@@ -54,18 +54,28 @@ That's it. curgit will use Cursor's built-in LLM via `cursor agent` by default.
 
 ## Auto-Split
 
-When staged changes are large (8+ files or 20+ hunks), curgit automatically suggests splitting them into multiple atomic commits.
+By default, curgit uses `auto` split mode. It will switch to semantic split when any threshold is met:
+
+- 8+ changed files
+- 20+ hunks
+- 20,000+ formatted diff characters
 
 ```bash
 # Auto-detected based on diff size
 git add .
 curgit
 
-# Force split mode
-curgit --split
+# Split strategies
+curgit --split-mode auto     # default
+curgit --split-mode always   # always run split flow
+curgit --split-mode never    # never split
 
-# Disable auto-split
-curgit --no-split
+# Backward-compatible aliases
+curgit --split      # same as --split-mode always
+curgit --no-split   # same as --split-mode never
+
+# Override auto thresholds
+curgit --split-files-threshold 10 --split-hunks-threshold 30 --split-chars-threshold 30000
 ```
 
 ### How It Works
@@ -197,6 +207,9 @@ model = "claude-sonnet-4-20250514"
 | `CURGIT_API_KEY` or `OPENAI_API_KEY` | API key for cloud providers |
 | `CURGIT_API_BASE` or `OPENAI_API_BASE` | Override API base URL |
 | `CURGIT_MODEL` | Override model name |
+| `CURGIT_SPLIT_FILES_THRESHOLD` | Auto-split file threshold (default `8`) |
+| `CURGIT_SPLIT_HUNKS_THRESHOLD` | Auto-split hunk threshold (default `20`) |
+| `CURGIT_SPLIT_CHARS_THRESHOLD` | Auto-split diff char threshold (default `20000`) |
 
 ### Priority
 
@@ -226,11 +239,10 @@ curgit --lang zh
 # Specify a different model
 curgit --provider openai --model gpt-4o
 
-# Force split into multiple commits
-curgit --split
-
-# Disable auto-split
-curgit --no-split
+# Split strategy
+curgit --split-mode auto
+curgit --split-mode always
+curgit --split-mode never
 
 # Dry run (preview only, no commit)
 curgit --dry-run

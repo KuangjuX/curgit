@@ -1,8 +1,12 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::Duration;
+use tokio::time::sleep;
 
 const CURSOR_CLI_FALLBACK_PATH: &str = "/Applications/Cursor.app/Contents/Resources/app/bin/cursor";
+const LLM_TIMEOUT_SECS: u64 = 90;
+const LLM_MAX_RETRIES: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -331,15 +335,55 @@ pub async fn generate_commit_message(
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String> {
-    let content = if config.provider.uses_cursor_cli() {
-        call_cursor_cli(system_prompt, user_prompt).await?
-    } else if config.provider.uses_anthropic_api() {
-        call_anthropic(config, system_prompt, user_prompt).await?
-    } else {
-        call_openai_compatible(config, system_prompt, user_prompt).await?
-    };
+    for attempt in 0..=LLM_MAX_RETRIES {
+        let result = tokio::time::timeout(
+            Duration::from_secs(LLM_TIMEOUT_SECS),
+            generate_once(config, system_prompt, user_prompt),
+        )
+        .await;
 
-    Ok(clean_commit_message(&content))
+        match result {
+            Ok(Ok(content)) => return Ok(clean_commit_message(&content)),
+            Ok(Err(err)) => {
+                let retryable = is_retryable_error(&err);
+                if retryable && attempt < LLM_MAX_RETRIES {
+                    sleep(backoff_for_attempt(attempt)).await;
+                    continue;
+                }
+                if retryable {
+                    bail!(
+                        "{} (retried {} times)",
+                        strip_retry_prefix(&err.to_string()),
+                        LLM_MAX_RETRIES
+                    );
+                }
+                return Err(err);
+            }
+            Err(_) => {
+                if attempt < LLM_MAX_RETRIES {
+                    sleep(backoff_for_attempt(attempt)).await;
+                    continue;
+                }
+                bail!(
+                    "LLM request timed out after {} seconds (retried {} times)",
+                    LLM_TIMEOUT_SECS,
+                    LLM_MAX_RETRIES
+                );
+            }
+        }
+    }
+
+    bail!("LLM request failed unexpectedly")
+}
+
+async fn generate_once(config: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String> {
+    if config.provider.uses_cursor_cli() {
+        call_cursor_cli(system_prompt, user_prompt).await
+    } else if config.provider.uses_anthropic_api() {
+        call_anthropic(config, system_prompt, user_prompt).await
+    } else {
+        call_openai_compatible(config, system_prompt, user_prompt).await
+    }
 }
 
 async fn call_cursor_cli(system_prompt: &str, user_prompt: &str) -> Result<String> {
@@ -354,7 +398,9 @@ async fn call_cursor_cli(system_prompt: &str, user_prompt: &str) -> Result<Strin
         system_prompt, user_prompt
     );
 
-    let mut child = Command::new(&cursor_bin)
+    let mut command = Command::new(&cursor_bin);
+    command.kill_on_drop(true);
+    let mut child = command
         .args(["agent", "--trust"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -414,7 +460,10 @@ async fn call_openai_compatible(
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(LLM_TIMEOUT_SECS))
+        .build()
+        .context("Failed to build HTTP client")?;
     let url = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
 
     let request = ChatRequest {
@@ -444,12 +493,12 @@ async fn call_openai_compatible(
     let response = req
         .send()
         .await
-        .context("Failed to connect to LLM API. Is the service running?")?;
+        .map_err(map_transport_error)?;
 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        bail!("LLM API returned {status}: {body}");
+        return Err(map_status_error(status, &body, "LLM API"));
     }
 
     let chat_response: ChatResponse = response
@@ -469,7 +518,10 @@ async fn call_anthropic(
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(LLM_TIMEOUT_SECS))
+        .build()
+        .context("Failed to build HTTP client")?;
     let url = format!("{}/v1/messages", config.api_base.trim_end_matches('/'));
 
     let api_key = config
@@ -496,12 +548,12 @@ async fn call_anthropic(
         .json(&request)
         .send()
         .await
-        .context("Failed to connect to Anthropic API")?;
+        .map_err(map_transport_error)?;
 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        bail!("Anthropic API returned {status}: {body}");
+        return Err(map_status_error(status, &body, "Anthropic API"));
     }
 
     let anthropic_response: AnthropicResponse = response
@@ -530,4 +582,53 @@ fn clean_commit_message(msg: &str) -> String {
     };
 
     msg.to_string()
+}
+
+fn backoff_for_attempt(attempt: usize) -> Duration {
+    // attempt=0 -> 1s, attempt=1 -> 2s ...
+    Duration::from_secs(1u64 << attempt.min(5))
+}
+
+fn map_transport_error(err: reqwest::Error) -> anyhow::Error {
+    if err.is_timeout() || err.is_connect() || err.is_request() {
+        anyhow::anyhow!(
+            "__retryable__:Failed to connect to LLM API. Check your network or API endpoint."
+        )
+    } else {
+        anyhow::anyhow!("Failed to call LLM API: {err}")
+    }
+}
+
+fn map_status_error(status: reqwest::StatusCode, body: &str, label: &str) -> anyhow::Error {
+    let snippet = trim_error_body(body);
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return anyhow::anyhow!(
+            "{label} authentication failed ({status}). Check API key/permissions. Response: {snippet}"
+        );
+    }
+
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        return anyhow::anyhow!(
+            "__retryable__:{label} is temporarily unavailable ({status}). Response: {snippet}"
+        );
+    }
+
+    anyhow::anyhow!("{label} returned {status}. Response: {snippet}")
+}
+
+fn trim_error_body(body: &str) -> String {
+    const MAX_LEN: usize = 400;
+    if body.len() <= MAX_LEN {
+        body.to_string()
+    } else {
+        format!("{}...", &body[..MAX_LEN])
+    }
+}
+
+fn is_retryable_error(err: &anyhow::Error) -> bool {
+    err.to_string().starts_with("__retryable__:")
+}
+
+fn strip_retry_prefix(message: &str) -> String {
+    message.trim_start_matches("__retryable__:").to_string()
 }
