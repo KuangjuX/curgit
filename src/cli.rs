@@ -22,6 +22,29 @@ pub enum UserAction {
     Cancel,
 }
 
+pub enum SplitAction {
+    Proceed,
+    Cancel,
+}
+
+pub fn prompt_split_action() -> Result<SplitAction> {
+    let items = vec![
+        "✅ Proceed — execute all commits in order",
+        "❌ Cancel  — abort, keep all files staged",
+    ];
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Execute this split plan?")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    match selection {
+        0 => Ok(SplitAction::Proceed),
+        _ => Ok(SplitAction::Cancel),
+    }
+}
+
 pub fn display_commit_message(message: &str) {
     println!();
     println!("{}", "─".repeat(60).dimmed());

@@ -2,6 +2,7 @@ mod cli;
 mod git;
 mod llm;
 mod prompt;
+mod split;
 
 use anyhow::Result;
 use clap::Parser;
@@ -14,7 +15,7 @@ struct Args {
     #[arg(short, long, default_value = "en")]
     lang: String,
 
-    /// LLM provider: ollama, openai, claude, kimi, deepseek, custom
+    /// LLM provider: cursor, ollama, openai, claude, kimi, deepseek, custom
     #[arg(short, long)]
     provider: Option<String>,
 
@@ -29,6 +30,14 @@ struct Args {
     /// Dry run — generate message without committing
     #[arg(long)]
     dry_run: bool,
+
+    /// Force auto-split mode for large diffs
+    #[arg(long)]
+    split: bool,
+
+    /// Disable auto-split even for large diffs
+    #[arg(long)]
+    no_split: bool,
 
     /// Show current config and exit
     #[arg(long)]
@@ -63,9 +72,6 @@ async fn run() -> Result<()> {
     let cursorrules = git::read_cursorrules();
     let language = prompt::Language::from_str(&args.lang);
 
-    let system_prompt = prompt::build_system_prompt(language, cursorrules.as_deref());
-    let user_prompt = prompt::build_user_prompt(&diff, &formatted_diff);
-
     let config = llm::LlmConfig::resolve(
         args.provider.as_deref(),
         args.model.as_deref(),
@@ -76,6 +82,23 @@ async fn run() -> Result<()> {
         "Using {} (model: {})",
         config.provider, config.model
     ));
+
+    // Decide whether to split
+    let use_split = if args.split {
+        true
+    } else if args.no_split {
+        false
+    } else {
+        split::should_suggest_split(&diff)
+    };
+
+    if use_split {
+        return run_split_flow(&args, &config, &diff, &formatted_diff).await;
+    }
+
+    // Normal single-commit flow
+    let system_prompt = prompt::build_system_prompt(language, cursorrules.as_deref());
+    let user_prompt = prompt::build_user_prompt(&diff, &formatted_diff);
 
     let spinner = cli::create_spinner("Generating commit message...");
     let message = llm::generate_commit_message(&config, &system_prompt, &user_prompt).await?;
@@ -119,6 +142,50 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+async fn run_split_flow(
+    args: &Args,
+    config: &llm::LlmConfig,
+    diff: &git::StagedDiff,
+    formatted_diff: &str,
+) -> Result<()> {
+    cli::print_info(&format!(
+        "Large diff detected ({} files). Generating split plan...",
+        diff.files.len()
+    ));
+
+    let spinner = cli::create_spinner("Analyzing diff and generating split plan...");
+    let groups = split::generate_split_plan(config, diff, formatted_diff, &args.lang).await?;
+    spinner.finish_and_clear();
+
+    // Validate the plan
+    let warnings = split::validate_split_plan(&groups, diff);
+    for w in &warnings {
+        cli::print_warning(w);
+    }
+
+    split::display_split_plan(&groups);
+
+    if args.dry_run {
+        cli::print_info("Dry run — no commits created.");
+        return Ok(());
+    }
+
+    match cli::prompt_split_action()? {
+        cli::SplitAction::Proceed => {
+            split::execute_split_plan(&groups, &diff.files)?;
+            cli::print_success(&format!(
+                "All {} commits created successfully!",
+                groups.len()
+            ));
+        }
+        cli::SplitAction::Cancel => {
+            cli::print_info("Split cancelled. All files remain staged.");
+        }
+    }
+
+    Ok(())
+}
+
 fn show_config(args: &Args) -> Result<()> {
     let config = llm::LlmConfig::resolve(
         args.provider.as_deref(),
@@ -135,7 +202,11 @@ fn show_config(args: &Args) -> Result<()> {
         config
             .api_key
             .as_ref()
-            .map(|k| format!("{}...{}", &k[..4.min(k.len())], &k[k.len().saturating_sub(4)..]))
+            .map(|k| format!(
+                "{}...{}",
+                &k[..4.min(k.len())],
+                &k[k.len().saturating_sub(4)..]
+            ))
             .unwrap_or_else(|| "(not set)".to_string())
     );
     if let Some(path) = llm::LlmConfig::config_file_path() {

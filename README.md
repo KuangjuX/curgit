@@ -1,4 +1,4 @@
-# Curgit
+# curgit
 
 A high-performance CLI tool written in Rust that acts as a standalone **Git Agent**. It analyzes staged changes in a git repository and generates professional, context-aware commit messages following the [Conventional Commits](https://www.conventionalcommits.org/) standard using LLM.
 
@@ -8,13 +8,27 @@ A high-performance CLI tool written in Rust that acts as a standalone **Git Agen
 - **Smart Diff Analysis** — Extracts staged changes, file names, hunks, and function signatures
 - **Noise Filtering** — Automatically excludes lock files, binary files, and other noise
 - **Conventional Commits** — Generates messages in `<type>(<scope>): <subject>` format with detailed body
+- **Auto-Split** — Automatically splits large diffs into multiple atomic commits
 - **Multi-Provider LLM** — Supports Cursor, Ollama, OpenAI, Claude, Kimi, DeepSeek, and any OpenAI-compatible API
 - **Multi-Language** — Supports English and Chinese commit messages
 - **Interactive UX** — Loading spinner, commit preview, and [Commit / Edit / Cancel] prompt
 - **Project-Aware** — Reads `.cursorrules` to align with local project conventions
 - **Config File** — Persistent configuration via `~/.config/curgit/config.toml`
+- **One-Click Install** — `install.sh` builds and installs to `/usr/local/bin`
 
 ## Installation
+
+### One-Click Install
+
+```bash
+# From the project directory
+./install.sh
+
+# Or install to a custom location
+CURGIT_INSTALL_DIR=~/.local/bin ./install.sh
+```
+
+### Manual Install
 
 ```bash
 cargo install --path .
@@ -37,6 +51,61 @@ curgit
 ```
 
 That's it. curgit will use Cursor's built-in LLM via `cursor agent` by default.
+
+## Auto-Split
+
+When staged changes are large (8+ files or 20+ hunks), curgit automatically suggests splitting them into multiple atomic commits.
+
+```bash
+# Auto-detected based on diff size
+git add .
+curgit
+
+# Force split mode
+curgit --split
+
+# Disable auto-split
+curgit --no-split
+```
+
+### How It Works
+
+1. curgit detects that the diff is large
+2. Sends the diff to the LLM with a split-analysis prompt
+3. LLM groups files by logical change and generates a commit message per group
+4. Displays the full split plan for review
+5. On confirmation, executes each commit in order:
+   - Unstages all files
+   - For each group: stages the group's files → commits with the generated message
+
+### Example Output
+
+```
+  Split plan: 3 commits
+
+  Commit 1/3
+  feat(auth): add OAuth2 login support
+  - Implement Google OAuth2 flow with PKCE
+  - Add token refresh middleware
+  Files:
+    • src/auth.rs
+    • src/middleware.rs
+
+  Commit 2/3
+  refactor(db): migrate to connection pooling
+  - Replace single connection with r2d2 pool
+  - Add health check endpoint
+  Files:
+    • src/db.rs
+    • src/health.rs
+
+  Commit 3/3
+  docs: update README with new setup instructions
+  - Add OAuth2 configuration section
+  - Document database pool settings
+  Files:
+    • README.md
+```
 
 ## LLM Providers
 
@@ -142,6 +211,12 @@ curgit --lang zh
 # Specify a different model
 curgit --provider openai --model gpt-4o
 
+# Force split into multiple commits
+curgit --split
+
+# Disable auto-split
+curgit --no-split
+
 # Dry run (preview only, no commit)
 curgit --dry-run
 
@@ -153,9 +228,10 @@ curgit --show-config
 
 1. `curgit` reads your staged diff (`git diff --cached`)
 2. Filters out noise (lock files, binaries, etc.)
-3. Sends the diff to the configured LLM (Cursor Auto by default)
-4. Displays the generated commit message
-5. You choose: **Commit**, **Edit**, or **Cancel**
+3. If the diff is large, auto-splits into multiple atomic commits
+4. Sends the diff to the configured LLM (Cursor Auto by default)
+5. Displays the generated commit message(s)
+6. You choose: **Commit**, **Edit**, or **Cancel** (single) / **Proceed** or **Cancel** (split)
 
 ## Architecture
 
@@ -165,6 +241,7 @@ src/
 ├── git.rs      # Git observer — diff extraction and filtering
 ├── prompt.rs   # Prompt engineering — system/user prompt construction
 ├── llm.rs      # Multi-provider LLM client (Cursor, Ollama, OpenAI, Claude, Kimi, DeepSeek)
+├── split.rs    # Auto-split engine — LLM-driven commit splitting
 └── cli.rs      # CLI UX — spinner, display, interactive prompts
 ```
 
