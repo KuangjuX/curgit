@@ -8,7 +8,7 @@ A high-performance CLI tool written in Rust that acts as a standalone **Git Agen
 - **Smart Diff Analysis** — Extracts staged changes, file names, hunks, and function signatures
 - **Noise Filtering** — Automatically excludes lock files, binary files, and other noise
 - **Conventional Commits** — Generates messages in `<type>(<scope>): <subject>` format with detailed body
-- **Auto-Split** — Automatically splits large diffs into multiple atomic commits
+- **Semantic Auto-Split** — Splits staged changes by intent/functionality into multiple atomic commits
 - **Multi-Provider LLM** — Supports Cursor, Ollama, OpenAI, Claude, Kimi, DeepSeek, and any OpenAI-compatible API
 - **Multi-Language** — Supports English and Chinese commit messages
 - **Interactive UX** — Loading spinner, commit preview, and [Commit / Edit / Cancel] prompt
@@ -52,41 +52,28 @@ curgit
 
 That's it. curgit will use Cursor's built-in LLM via `cursor agent` by default.
 
-## Auto-Split
+## Semantic Auto-Split
 
-By default, curgit uses `auto` split mode. It will switch to semantic split when any threshold is met:
-
-- 8+ changed files
-- 20+ hunks
-- 20,000+ formatted diff characters
+By default, curgit uses semantic split mode and asks the LLM to group staged changes by intent/functionality (instead of splitting by diff size only).
 
 ```bash
-# Auto-detected based on diff size
 git add .
-curgit
+curgit            # default: semantic split flow
 
-# Split strategies
-curgit --split-mode auto     # default
-curgit --split-mode always   # always run split flow
-curgit --split-mode never    # never split
-
-# Backward-compatible aliases
-curgit --split      # same as --split-mode always
-curgit --no-split   # same as --split-mode never
-
-# Override auto thresholds
-curgit --split-files-threshold 10 --split-hunks-threshold 30 --split-chars-threshold 30000
+curgit --split    # explicitly force semantic split flow
+curgit --no-split # disable split and generate a single commit message
 ```
 
 ### How It Works
 
-1. curgit detects that the diff is large
-2. Sends the diff to the LLM with a split-analysis prompt
-3. LLM groups files by logical change and generates a commit message per group
+1. curgit parses staged patch hunks and assigns stable hunk IDs (e.g. `H1`, `H2`)
+2. Sends full diff + hunk inventory to the LLM with a split-analysis prompt
+3. LLM groups hunks/files by logical change and generates a commit message per group
 4. Displays the full split plan for review
 5. On confirmation, executes each commit in order:
    - Unstages all files
-   - For each group: stages the group's files → commits with the generated message
+   - For each group: applies the group's selected hunks to index (`git apply --cached`) and stages whole-file items when needed
+   - Commits with the generated message
 
 ### Example Output
 
@@ -97,6 +84,9 @@ curgit --split-files-threshold 10 --split-hunks-threshold 30 --split-chars-thres
   feat(auth): add OAuth2 login support
   - Implement Google OAuth2 flow with PKCE
   - Add token refresh middleware
+  Hunks: (2)
+    • H1
+    • H2
   Files:
     • src/auth.rs
     • src/middleware.rs
@@ -207,9 +197,6 @@ model = "claude-sonnet-4-20250514"
 | `CURGIT_API_KEY` or `OPENAI_API_KEY` | API key for cloud providers |
 | `CURGIT_API_BASE` or `OPENAI_API_BASE` | Override API base URL |
 | `CURGIT_MODEL` | Override model name |
-| `CURGIT_SPLIT_FILES_THRESHOLD` | Auto-split file threshold (default `8`) |
-| `CURGIT_SPLIT_HUNKS_THRESHOLD` | Auto-split hunk threshold (default `20`) |
-| `CURGIT_SPLIT_CHARS_THRESHOLD` | Auto-split diff char threshold (default `20000`) |
 
 ### Priority
 
@@ -239,10 +226,9 @@ curgit --lang zh
 # Specify a different model
 curgit --provider openai --model gpt-4o
 
-# Split strategy
-curgit --split-mode auto
-curgit --split-mode always
-curgit --split-mode never
+# Split controls
+curgit --split
+curgit --no-split
 
 # Dry run (preview only, no commit)
 curgit --dry-run
@@ -255,7 +241,7 @@ curgit --show-config
 
 1. `curgit` reads your staged diff (`git diff --cached`)
 2. Filters out noise (lock files, binaries, etc.)
-3. If the diff is large, auto-splits into multiple atomic commits
+3. By default, performs semantic split planning with hunk-level grouping
 4. Sends the diff to the configured LLM (Cursor Auto by default)
 5. Displays the generated commit message(s)
 6. You choose: **Commit**, **Edit**, or **Cancel** (single) / **Proceed** or **Cancel** (split)
