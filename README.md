@@ -1,5 +1,8 @@
 # curgit
 
+[![Language-English](https://img.shields.io/badge/Language-English-2f80ed?style=for-the-badge)](./README.md)
+[![语言-中文](https://img.shields.io/badge/%E8%AF%AD%E8%A8%80-%E4%B8%AD%E6%96%87-e11d48?style=for-the-badge)](./README.zh-CN.md)
+
 A high-performance CLI tool written in Rust that acts as a standalone **Git Agent**. It analyzes staged changes in a git repository and generates professional, context-aware commit messages following the [Conventional Commits](https://www.conventionalcommits.org/) standard using LLM.
 
 ## Features
