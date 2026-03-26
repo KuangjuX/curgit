@@ -8,6 +8,12 @@ const CURSOR_CLI_FALLBACK_PATH: &str = "/Applications/Cursor.app/Contents/Resour
 const LLM_TIMEOUT_SECS: u64 = 90;
 const LLM_MAX_RETRIES: usize = 2;
 
+#[derive(Debug)]
+enum CursorCliKind {
+    Desktop,
+    AgentCli,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -378,7 +384,7 @@ pub async fn generate_commit_message(
 
 async fn generate_once(config: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String> {
     if config.provider.uses_cursor_cli() {
-        call_cursor_cli(system_prompt, user_prompt).await
+        call_cursor_cli(system_prompt, user_prompt, &config.model).await
     } else if config.provider.uses_anthropic_api() {
         call_anthropic(config, system_prompt, user_prompt).await
     } else {
@@ -386,12 +392,12 @@ async fn generate_once(config: &LlmConfig, system_prompt: &str, user_prompt: &st
     }
 }
 
-async fn call_cursor_cli(system_prompt: &str, user_prompt: &str) -> Result<String> {
+async fn call_cursor_cli(system_prompt: &str, user_prompt: &str, model: &str) -> Result<String> {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
 
-    let cursor_bin = find_cursor_cli()?;
+    let (cursor_bin, kind) = find_cursor_cli()?;
 
     let prompt = format!(
         "{}\n\n---\n\n{}\n\nIMPORTANT: Output ONLY the raw commit message. No explanations, no markdown fences, no extra text.",
@@ -400,8 +406,18 @@ async fn call_cursor_cli(system_prompt: &str, user_prompt: &str) -> Result<Strin
 
     let mut command = Command::new(&cursor_bin);
     command.kill_on_drop(true);
+
+    match kind {
+        CursorCliKind::Desktop => {
+            command.args(["agent", "--trust"]);
+        }
+        CursorCliKind::AgentCli => {
+            let agent_model = model.strip_prefix("cursor-").unwrap_or(model);
+            command.args(["--print", "--trust", "--model", agent_model]);
+        }
+    }
+
     let mut child = command
-        .args(["agent", "--trust"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -431,27 +447,49 @@ async fn call_cursor_cli(system_prompt: &str, user_prompt: &str) -> Result<Strin
     Ok(stdout)
 }
 
-fn find_cursor_cli() -> Result<String> {
-    // Prefer auto-discovery from PATH first.
-    if let Ok(output) = std::process::Command::new("which").arg("cursor").output() {
-        if output.status.success() {
-            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Ok(p);
+fn find_cursor_cli() -> Result<(String, CursorCliKind)> {
+    if let Ok(path) = std::env::var("CURGIT_CURSOR_CLI") {
+        let path = path.trim().to_string();
+        if !path.is_empty() {
+            if !std::path::Path::new(&path).exists() {
+                bail!("CURGIT_CURSOR_CLI points to '{path}', which does not exist");
+            }
+            let kind = if path.contains("cursor-agent") {
+                CursorCliKind::AgentCli
+            } else {
+                CursorCliKind::Desktop
+            };
+            return Ok((path, kind));
+        }
+    }
+
+    for (name, kind) in [
+        ("cursor-agent", CursorCliKind::AgentCli),
+        ("cursor", CursorCliKind::Desktop),
+    ] {
+        if let Ok(output) = std::process::Command::new("which").arg(name).output() {
+            if output.status.success() {
+                let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !p.is_empty() {
+                    return Ok((p, kind));
+                }
             }
         }
     }
 
-    // Fallback: fixed macOS installation path.
     let path = std::path::Path::new(CURSOR_CLI_FALLBACK_PATH);
     if path.exists() {
-        return Ok(CURSOR_CLI_FALLBACK_PATH.to_string());
+        return Ok((CURSOR_CLI_FALLBACK_PATH.to_string(), CursorCliKind::Desktop));
     }
 
     bail!(
-        "Cursor CLI not found in PATH or at fallback path '{CURSOR_CLI_FALLBACK_PATH}'.\n\
-         Install Cursor from https://cursor.sh or switch to another provider:\n  \
-         curgit --provider ollama"
+        "Cursor CLI not found. Searched for:\n  \
+         - 'cursor-agent' in PATH\n  \
+         - 'cursor' in PATH\n  \
+         - macOS fallback at '{CURSOR_CLI_FALLBACK_PATH}'\n\n\
+         Install cursor-agent: https://docs.cursor.com/cli\n\
+         Or set CURGIT_CURSOR_CLI to the binary path.\n\
+         Or switch to another provider: curgit --provider ollama"
     );
 }
 
