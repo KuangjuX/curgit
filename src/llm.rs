@@ -112,6 +112,37 @@ impl Default for LlmConfig {
     }
 }
 
+/// Optional Git author override for `git commit` (via `-c user.name` / `-c user.email`).
+/// Priority: `CURGIT_AUTHOR_NAME` / `CURGIT_AUTHOR_EMAIL` env > `[author]` in config file > (omit, use Git defaults).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuthorConfig {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+impl AuthorConfig {
+    /// Merge file config with environment overrides.
+    pub fn resolve(file: &ConfigFile) -> Self {
+        let mut name = file.author.name.clone();
+        let mut email = file.author.email.clone();
+        if let Ok(v) = std::env::var("CURGIT_AUTHOR_NAME") {
+            if !v.trim().is_empty() {
+                name = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("CURGIT_AUTHOR_EMAIL") {
+            if !v.trim().is_empty() {
+                email = Some(v);
+            }
+        }
+        Self { name, email }
+    }
+
+    pub fn has_any(&self) -> bool {
+        self.name.is_some() || self.email.is_some()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ConfigFile {
     pub provider: Option<String>,
@@ -120,6 +151,8 @@ pub struct ConfigFile {
     pub model: Option<String>,
     #[serde(default)]
     pub providers: ProviderOverrides,
+    #[serde(default)]
+    pub author: AuthorConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -161,7 +194,7 @@ impl LlmConfig {
         cli_model: Option<&str>,
         cli_api_base: Option<&str>,
     ) -> Result<Self> {
-        let file_config = Self::load_config_file();
+        let file_config = ConfigFile::load();
 
         let provider = cli_provider
             .map(|s| Provider::from_str(s))
@@ -244,7 +277,13 @@ impl LlmConfig {
         })
     }
 
-    fn load_config_file() -> Result<ConfigFile> {
+    pub fn config_file_path() -> Option<std::path::PathBuf> {
+        dirs::config_dir().map(|d| d.join("curgit").join("config.toml"))
+    }
+}
+
+impl ConfigFile {
+    pub fn load() -> Result<ConfigFile> {
         let config_path = dirs::config_dir()
             .map(|d| d.join("curgit").join("config.toml"))
             .context("Could not determine config directory")?;
@@ -258,10 +297,6 @@ impl LlmConfig {
 
         toml::from_str(&content)
             .with_context(|| format!("Failed to parse {}", config_path.display()))
-    }
-
-    pub fn config_file_path() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|d| d.join("curgit").join("config.toml"))
     }
 }
 
