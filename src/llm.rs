@@ -454,17 +454,14 @@ fn find_cursor_cli() -> Result<(String, CursorCliKind)> {
             if !std::path::Path::new(&path).exists() {
                 bail!("CURGIT_CURSOR_CLI points to '{path}', which does not exist");
             }
-            let kind = if path.contains("cursor-agent") {
-                CursorCliKind::AgentCli
-            } else {
-                CursorCliKind::Desktop
-            };
+            let kind = cursor_cli_kind_from_bin_path(&path);
             return Ok((path, kind));
         }
     }
 
     for (name, kind) in [
         ("cursor-agent", CursorCliKind::AgentCli),
+        ("agent", CursorCliKind::AgentCli),
         ("cursor", CursorCliKind::Desktop),
     ] {
         if let Ok(output) = std::process::Command::new("which").arg(name).output() {
@@ -484,13 +481,25 @@ fn find_cursor_cli() -> Result<(String, CursorCliKind)> {
 
     bail!(
         "Cursor CLI not found. Searched for:\n  \
-         - 'cursor-agent' in PATH\n  \
+         - 'cursor-agent' or 'agent' (Linux) in PATH\n  \
          - 'cursor' in PATH\n  \
          - macOS fallback at '{CURSOR_CLI_FALLBACK_PATH}'\n\n\
-         Install cursor-agent: https://docs.cursor.com/cli\n\
+         Install Cursor CLI: https://docs.cursor.com/cli\n\
          Or set CURGIT_CURSOR_CLI to the binary path.\n\
          Or switch to another provider: curgit --provider ollama"
     );
+}
+
+/// Classify Cursor CLI by executable basename (`cursor` vs `cursor-agent` / `agent`).
+fn cursor_cli_kind_from_bin_path(path: &str) -> CursorCliKind {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    match name {
+        "cursor-agent" | "agent" => CursorCliKind::AgentCli,
+        _ => CursorCliKind::Desktop,
+    }
 }
 
 async fn call_openai_compatible(

@@ -134,7 +134,7 @@ curgit
 curgit --provider cursor
 ```
 
-Cursor CLI is detected at `/Applications/Cursor.app/Contents/Resources/app/bin/cursor` (macOS) or via `cursor` in PATH.
+Cursor CLI is detected at `/Applications/Cursor.app/Contents/Resources/app/bin/cursor` (macOS), or via `cursor-agent`, `agent` (Linux), or `cursor` in PATH.
 
 ### Using Ollama (Local, Offline)
 

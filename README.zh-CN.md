@@ -134,7 +134,7 @@ curgit
 curgit --provider cursor
 ```
 
-在 macOS 上会检测 `/Applications/Cursor.app/Contents/Resources/app/bin/cursor`，或使用 PATH 中的 `cursor`。
+在 macOS 上会检测 `/Applications/Cursor.app/Contents/Resources/app/bin/cursor`；Linux 上 PATH 中的 `agent` 或 `cursor-agent`，以及 `cursor` 也会被识别。
 
 ### 使用 Ollama（本地离线）
 
