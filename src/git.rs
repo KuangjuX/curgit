@@ -1,6 +1,20 @@
+use crate::llm::AuthorConfig;
 use anyhow::{Context, Result};
 use git2::{Delta, DiffOptions, Repository};
 use std::path::Path;
+use std::process::Command;
+
+/// Build a `git` command with optional `-c user.name` / `-c user.email` before subcommands like `commit`.
+pub fn git_with_author(author: &AuthorConfig) -> Command {
+    let mut cmd = Command::new("git");
+    if let Some(ref n) = author.name {
+        cmd.arg("-c").arg(format!("user.name={n}"));
+    }
+    if let Some(ref e) = author.email {
+        cmd.arg("-c").arg(format!("user.email={e}"));
+    }
+    cmd
+}
 
 #[derive(Debug, Clone)]
 pub struct FileChange {

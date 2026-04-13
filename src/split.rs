@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use crate::git::StagedDiff;
-use crate::llm::LlmConfig;
+use crate::git::{git_with_author, StagedDiff};
+use crate::llm::{AuthorConfig, LlmConfig};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommitGroup {
@@ -280,20 +280,23 @@ pub fn parse_split_response(response: &str) -> Result<Vec<CommitGroup>> {
     Ok(groups)
 }
 
-pub async fn generate_split_plan(
+pub async fn generate_split_plan_with_session(
     config: &LlmConfig,
     diff: &StagedDiff,
     formatted_diff: &str,
     staged_patch: &ParsedStagedPatch,
     language: &str,
-) -> Result<Vec<CommitGroup>> {
+    session_id: Option<&str>,
+) -> Result<(Vec<CommitGroup>, Option<crate::session::CursorJsonResponse>)> {
     let system_prompt =
         "You are a Git commit splitting assistant. Output ONLY valid JSON. No markdown, no explanation.";
     let user_prompt = build_split_prompt(diff, formatted_diff, staged_patch, language);
 
-    let response = crate::llm::generate_commit_message(config, system_prompt, &user_prompt).await?;
+    let (response, json_resp) =
+        crate::llm::generate_with_session(config, system_prompt, &user_prompt, session_id).await?;
 
-    parse_split_response(&response)
+    let groups = parse_split_response(&response)?;
+    Ok((groups, json_resp))
 }
 
 pub fn display_split_plan(groups: &[CommitGroup]) {
@@ -425,9 +428,13 @@ pub fn validate_split_plan(
 }
 
 /// Execute the split plan: re-stage and commit by hunk/file groups.
-pub fn execute_split_plan(groups: &[CommitGroup], staged_patch: &ParsedStagedPatch) -> Result<()> {
+pub fn execute_split_plan(
+    groups: &[CommitGroup],
+    staged_patch: &ParsedStagedPatch,
+    author: &AuthorConfig,
+) -> Result<()> {
     let index_tree = snapshot_index_tree()?;
-    let result = execute_split_plan_inner(groups, staged_patch);
+    let result = execute_split_plan_inner(groups, staged_patch, author);
     if let Err(err) = result {
         match restore_index_tree(&index_tree) {
             Ok(_) => {
@@ -445,7 +452,11 @@ pub fn execute_split_plan(groups: &[CommitGroup], staged_patch: &ParsedStagedPat
     Ok(())
 }
 
-fn execute_split_plan_inner(groups: &[CommitGroup], staged_patch: &ParsedStagedPatch) -> Result<()> {
+fn execute_split_plan_inner(
+    groups: &[CommitGroup],
+    staged_patch: &ParsedStagedPatch,
+    author: &AuthorConfig,
+) -> Result<()> {
     let all_paths: Vec<&str> = staged_patch.files.iter().map(|f| f.path.as_str()).collect();
     unstage_files(&all_paths)?;
 
@@ -471,7 +482,7 @@ fn execute_split_plan_inner(groups: &[CommitGroup], staged_patch: &ParsedStagedP
             );
         }
 
-        let status = Command::new("git")
+        let status = git_with_author(author)
             .args(["commit", "-m", &group.message])
             .status()
             .with_context(|| format!("Failed to run git commit for group {}", i + 1))?;

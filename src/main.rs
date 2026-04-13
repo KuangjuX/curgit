@@ -2,11 +2,11 @@ mod cli;
 mod git;
 mod llm;
 mod prompt;
+mod session;
 mod split;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use std::process::Command;
 
 #[derive(Parser)]
 #[command(
@@ -62,6 +62,10 @@ struct Args {
     /// Show current config and exit
     #[arg(long)]
     show_config: bool,
+
+    /// Force start a new Cursor Agent session (discard the cached one)
+    #[arg(long)]
+    new_session: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -104,6 +108,9 @@ async fn run() -> Result<()> {
         return show_config(&args);
     }
 
+    let file_config = llm::ConfigFile::load()?;
+    let author = llm::AuthorConfig::resolve(&file_config);
+
     let diff = git::get_staged_diff(None)?;
 
     if diff.is_empty() {
@@ -139,29 +146,45 @@ async fn run() -> Result<()> {
         ));
     }
 
-    if use_split {
-        return run_split_flow(&args, &config, &diff, &formatted_diff).await;
+    let mut sess = session::SessionState::load();
+    if args.new_session {
+        sess.invalidate();
     }
 
-    // Normal single-commit flow with regeneration support
+    if use_split {
+        let result =
+            run_split_flow(&args, &config, &diff, &formatted_diff, &author, &mut sess).await;
+        let _ = sess.save();
+        return result;
+    }
+
     let system_prompt = prompt::build_system_prompt(language, cursorrules.as_deref());
     let user_prompt = prompt::build_user_prompt(&diff, &formatted_diff);
 
     loop {
         let spinner = cli::create_spinner("Generating commit message...");
-        let message = llm::generate_commit_message(&config, &system_prompt, &user_prompt).await?;
+        let active_sid = sess.is_valid().then(|| sess.session_id.clone()).flatten();
+        let (message, json_resp) = llm::generate_with_session(
+            &config,
+            &system_prompt,
+            &user_prompt,
+            active_sid.as_deref(),
+        )
+        .await?;
         spinner.finish_and_clear();
+
+        update_session(&mut sess, &json_resp);
 
         if args.dry_run {
             cli::display_commit_message(&message);
             cli::print_info("Dry run — no commit created.");
+            let _ = sess.save();
             return Ok(());
         }
 
-        // prompt_commit_flow returns Some(msg) to commit, None to regenerate
         match cli::prompt_commit_flow(&message)? {
             Some(final_message) => {
-                let status = Command::new("git")
+                let status = git::git_with_author(&author)
                     .args(["commit", "-m", &final_message])
                     .status()?;
 
@@ -171,6 +194,7 @@ async fn run() -> Result<()> {
                     cli::print_error("git commit failed.");
                     std::process::exit(1);
                 }
+                let _ = sess.save();
                 return Ok(());
             }
             None => {
@@ -181,11 +205,27 @@ async fn run() -> Result<()> {
     }
 }
 
+fn update_session(
+    sess: &mut session::SessionState,
+    json_resp: &Option<session::CursorJsonResponse>,
+) {
+    if let Some(resp) = json_resp {
+        if let (Some(sid), Some(usage)) = (&resp.session_id, &resp.usage) {
+            sess.update_from_response(sid, usage);
+            if !sess.is_valid() {
+                sess.invalidate();
+            }
+        }
+    }
+}
+
 async fn run_split_flow(
     args: &Args,
     config: &llm::LlmConfig,
     diff: &git::StagedDiff,
     formatted_diff: &str,
+    author: &llm::AuthorConfig,
+    sess: &mut session::SessionState,
 ) -> Result<()> {
     let staged_patch = split::parse_staged_patch()?;
     cli::print_info(&format!(
@@ -195,9 +235,19 @@ async fn run_split_flow(
     ));
 
     let spinner = cli::create_spinner("Analyzing diff and generating split plan...");
-    let mut groups =
-        split::generate_split_plan(config, diff, formatted_diff, &staged_patch, &args.lang).await?;
+    let active_sid = sess.is_valid().then(|| sess.session_id.clone()).flatten();
+    let (mut groups, json_resp) = split::generate_split_plan_with_session(
+        config,
+        diff,
+        formatted_diff,
+        &staged_patch,
+        &args.lang,
+        active_sid.as_deref(),
+    )
+    .await?;
     spinner.finish_and_clear();
+
+    update_session(sess, &json_resp);
 
     let warnings = split::validate_split_plan(&groups, diff, &staged_patch);
     for w in &warnings {
@@ -212,7 +262,7 @@ async fn run_split_flow(
 
     match cli::prompt_split_flow(&mut groups)? {
         cli::SplitAction::Proceed => {
-            split::execute_split_plan(&groups, &staged_patch)?;
+            split::execute_split_plan(&groups, &staged_patch, author)?;
             cli::print_success(&format!(
                 "All {} commits created successfully!",
                 groups.len()
@@ -232,6 +282,8 @@ fn show_config(args: &Args) -> Result<()> {
         args.model.as_deref(),
         args.api_base.as_deref(),
     )?;
+    let file_config = llm::ConfigFile::load()?;
+    let author = llm::AuthorConfig::resolve(&file_config);
 
     println!("curgit configuration:");
     println!("  provider:  {}", config.provider);
@@ -264,6 +316,32 @@ fn show_config(args: &Args) -> Result<()> {
         "  thresholds: files={} hunks={} chars={}",
         split_thresholds.files, split_thresholds.hunks, split_thresholds.chars
     );
+    if author.has_any() {
+        println!(
+            "  author:    name={} email={}",
+            author
+                .name
+                .as_deref()
+                .unwrap_or("(git default)"),
+            author
+                .email
+                .as_deref()
+                .unwrap_or("(git default)")
+        );
+    } else {
+        println!("  author:    (use Git user.name / user.email)");
+    }
+
+    let sess = session::SessionState::load();
+    if let Some(sid) = &sess.session_id {
+        println!("  session:   {}…{}", &sid[..8.min(sid.len())], &sid[sid.len().saturating_sub(4)..]);
+        println!("  turns:     {}", sess.turn_count);
+        println!("  ctx_tokens: {}", sess.context_tokens);
+        println!("  valid:     {}", sess.is_valid());
+    } else {
+        println!("  session:   (none)");
+    }
+
     Ok(())
 }
 

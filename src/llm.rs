@@ -419,7 +419,8 @@ pub async fn generate_commit_message(
 
 async fn generate_once(config: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String> {
     if config.provider.uses_cursor_cli() {
-        call_cursor_cli(system_prompt, user_prompt, &config.model).await
+        let (text, _) = call_cursor_cli(system_prompt, user_prompt, &config.model, None).await?;
+        Ok(text)
     } else if config.provider.uses_anthropic_api() {
         call_anthropic(config, system_prompt, user_prompt).await
     } else {
@@ -427,7 +428,68 @@ async fn generate_once(config: &LlmConfig, system_prompt: &str, user_prompt: &st
     }
 }
 
-async fn call_cursor_cli(system_prompt: &str, user_prompt: &str, model: &str) -> Result<String> {
+/// Generate with Cursor CLI session support.
+/// Returns the commit message text plus an optional parsed JSON response for session tracking.
+pub async fn generate_with_session(
+    config: &LlmConfig,
+    system_prompt: &str,
+    user_prompt: &str,
+    session_id: Option<&str>,
+) -> Result<(String, Option<crate::session::CursorJsonResponse>)> {
+    if !config.provider.uses_cursor_cli() {
+        let msg = generate_commit_message(config, system_prompt, user_prompt).await?;
+        return Ok((msg, None));
+    }
+
+    for attempt in 0..=LLM_MAX_RETRIES {
+        let result = tokio::time::timeout(
+            Duration::from_secs(LLM_TIMEOUT_SECS),
+            call_cursor_cli(system_prompt, user_prompt, &config.model, session_id),
+        )
+        .await;
+
+        match result {
+            Ok(Ok((content, json_resp))) => {
+                return Ok((clean_commit_message(&content), json_resp));
+            }
+            Ok(Err(err)) => {
+                let retryable = is_retryable_error(&err);
+                if retryable && attempt < LLM_MAX_RETRIES {
+                    sleep(backoff_for_attempt(attempt)).await;
+                    continue;
+                }
+                if retryable {
+                    bail!(
+                        "{} (retried {} times)",
+                        strip_retry_prefix(&err.to_string()),
+                        LLM_MAX_RETRIES
+                    );
+                }
+                return Err(err);
+            }
+            Err(_) => {
+                if attempt < LLM_MAX_RETRIES {
+                    sleep(backoff_for_attempt(attempt)).await;
+                    continue;
+                }
+                bail!(
+                    "LLM request timed out after {} seconds (retried {} times)",
+                    LLM_TIMEOUT_SECS,
+                    LLM_MAX_RETRIES
+                );
+            }
+        }
+    }
+
+    bail!("LLM request failed unexpectedly")
+}
+
+async fn call_cursor_cli(
+    system_prompt: &str,
+    user_prompt: &str,
+    model: &str,
+    session_id: Option<&str>,
+) -> Result<(String, Option<crate::session::CursorJsonResponse>)> {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
@@ -448,7 +510,14 @@ async fn call_cursor_cli(system_prompt: &str, user_prompt: &str, model: &str) ->
         }
         CursorCliKind::AgentCli => {
             let agent_model = model.strip_prefix("cursor-").unwrap_or(model);
-            command.args(["--print", "--trust", "--model", agent_model]);
+            command.args([
+                "--print", "--trust",
+                "--output-format", "json",
+                "--model", agent_model,
+            ]);
+            if let Some(sid) = session_id {
+                command.args(["--resume", sid]);
+            }
         }
     }
 
@@ -479,7 +548,21 @@ async fn call_cursor_cli(system_prompt: &str, user_prompt: &str, model: &str) ->
         bail!("Cursor agent returned empty output");
     }
 
-    Ok(stdout)
+    if matches!(kind, CursorCliKind::AgentCli) {
+        if let Ok(parsed) = serde_json::from_str::<crate::session::CursorJsonResponse>(&stdout) {
+            if parsed.is_error == Some(true) {
+                let msg = parsed.result.as_deref().unwrap_or("unknown error");
+                bail!("__retryable__:Cursor agent error: {msg}");
+            }
+            let text = parsed.result.clone().unwrap_or_default();
+            if text.is_empty() {
+                bail!("Cursor agent returned empty result in JSON response");
+            }
+            return Ok((text, Some(parsed)));
+        }
+    }
+
+    Ok((stdout, None))
 }
 
 fn find_cursor_cli() -> Result<(String, CursorCliKind)> {
