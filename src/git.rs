@@ -264,7 +264,11 @@ pub fn format_diff_for_prompt(diff: &StagedDiff) -> String {
     }
 
     if output.len() > MAX_DIFF_CHARS {
-        output.truncate(MAX_DIFF_CHARS);
+        let mut end = MAX_DIFF_CHARS;
+        while !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.truncate(end);
         output.push_str("\n\n[... diff truncated due to size limit ...]\n");
     }
 
