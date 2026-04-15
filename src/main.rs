@@ -19,7 +19,7 @@ struct Args {
     #[arg(short, long, default_value = "en")]
     lang: String,
 
-    /// LLM provider: cursor, ollama, openai, claude, kimi, deepseek, custom
+    /// LLM provider: cursor, claude-internal, ollama, openai, claude, kimi, deepseek, custom
     #[arg(short, long)]
     provider: Option<String>,
 

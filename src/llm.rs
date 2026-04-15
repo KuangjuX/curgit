@@ -18,6 +18,7 @@ enum CursorCliKind {
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Cursor,
+    ClaudeInternal,
     Ollama,
     OpenAI,
     Claude,
@@ -30,6 +31,7 @@ impl fmt::Display for Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Provider::Cursor => write!(f, "cursor"),
+            Provider::ClaudeInternal => write!(f, "claude-internal"),
             Provider::Ollama => write!(f, "ollama"),
             Provider::OpenAI => write!(f, "openai"),
             Provider::Claude => write!(f, "claude"),
@@ -44,6 +46,7 @@ impl Provider {
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "cursor" | "auto" => Ok(Provider::Cursor),
+            "claude-internal" | "claudeinternal" | "ci" => Ok(Provider::ClaudeInternal),
             "ollama" | "local" => Ok(Provider::Ollama),
             "openai" | "gpt" => Ok(Provider::OpenAI),
             "claude" | "anthropic" => Ok(Provider::Claude),
@@ -51,7 +54,7 @@ impl Provider {
             "deepseek" => Ok(Provider::DeepSeek),
             "custom" => Ok(Provider::Custom),
             _ => bail!(
-                "Unknown provider '{s}'. Available: cursor, ollama, openai, claude, kimi, deepseek, custom"
+                "Unknown provider '{s}'. Available: cursor, claude-internal, ollama, openai, claude, kimi, deepseek, custom"
             ),
         }
     }
@@ -59,6 +62,7 @@ impl Provider {
     pub fn default_base_url(&self) -> &str {
         match self {
             Provider::Cursor => "",
+            Provider::ClaudeInternal => "",
             Provider::Ollama => "http://localhost:11434/v1",
             Provider::OpenAI => "https://api.openai.com/v1",
             Provider::Claude => "https://api.anthropic.com",
@@ -71,6 +75,7 @@ impl Provider {
     pub fn default_model(&self) -> &str {
         match self {
             Provider::Cursor => "cursor-auto",
+            Provider::ClaudeInternal => "default",
             Provider::Ollama => "qwen2.5-coder:7b",
             Provider::OpenAI => "gpt-4o-mini",
             Provider::Claude => "claude-sonnet-4-20250514",
@@ -81,7 +86,7 @@ impl Provider {
     }
 
     pub fn requires_api_key(&self) -> bool {
-        !matches!(self, Provider::Cursor | Provider::Ollama)
+        !matches!(self, Provider::Cursor | Provider::ClaudeInternal | Provider::Ollama)
     }
 
     pub fn uses_anthropic_api(&self) -> bool {
@@ -90,6 +95,10 @@ impl Provider {
 
     pub fn uses_cursor_cli(&self) -> bool {
         matches!(self, Provider::Cursor)
+    }
+
+    pub fn uses_claude_internal_cli(&self) -> bool {
+        matches!(self, Provider::ClaudeInternal)
     }
 }
 
@@ -158,6 +167,8 @@ pub struct ConfigFile {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ProviderOverrides {
     pub cursor: Option<ProviderConfig>,
+    #[serde(rename = "claude-internal")]
+    pub claude_internal: Option<ProviderConfig>,
     pub ollama: Option<ProviderConfig>,
     pub openai: Option<ProviderConfig>,
     pub claude: Option<ProviderConfig>,
@@ -177,6 +188,7 @@ impl ConfigFile {
     fn provider_config(&self, provider: &Provider) -> Option<&ProviderConfig> {
         match provider {
             Provider::Cursor => self.providers.cursor.as_ref(),
+            Provider::ClaudeInternal => self.providers.claude_internal.as_ref(),
             Provider::Ollama => self.providers.ollama.as_ref(),
             Provider::OpenAI => self.providers.openai.as_ref(),
             Provider::Claude => self.providers.claude.as_ref(),
@@ -304,6 +316,7 @@ impl Provider {
     fn env_prefix(&self) -> &'static str {
         match self {
             Provider::Cursor => "CURSOR",
+            Provider::ClaudeInternal => "CLAUDE_INTERNAL",
             Provider::Ollama => "OLLAMA",
             Provider::OpenAI => "OPENAI",
             Provider::Claude => "CLAUDE",
@@ -421,6 +434,9 @@ async fn generate_once(config: &LlmConfig, system_prompt: &str, user_prompt: &st
     if config.provider.uses_cursor_cli() {
         let (text, _) = call_cursor_cli(system_prompt, user_prompt, &config.model, None).await?;
         Ok(text)
+    } else if config.provider.uses_claude_internal_cli() {
+        let (text, _) = call_claude_internal(system_prompt, user_prompt, None).await?;
+        Ok(text)
     } else if config.provider.uses_anthropic_api() {
         call_anthropic(config, system_prompt, user_prompt).await
     } else {
@@ -436,7 +452,70 @@ pub async fn generate_with_session(
     user_prompt: &str,
     session_id: Option<&str>,
 ) -> Result<(String, Option<crate::session::CursorJsonResponse>)> {
-    if !config.provider.uses_cursor_cli() {
+    if config.provider.uses_claude_internal_cli() {
+        let mut effective_session_id = session_id.map(|s| s.to_string());
+        for attempt in 0..=LLM_MAX_RETRIES {
+            let result = tokio::time::timeout(
+                Duration::from_secs(LLM_TIMEOUT_SECS),
+                call_claude_internal(system_prompt, user_prompt, effective_session_id.as_deref()),
+            )
+            .await;
+
+            match result {
+                Ok(Ok((content, json_resp))) => {
+                    // Convert ClaudeInternalJsonResponse to CursorJsonResponse for session compat
+                    let cursor_compat = json_resp.map(|ci| crate::session::CursorJsonResponse {
+                        resp_type: ci.resp_type,
+                        subtype: ci.subtype,
+                        is_error: ci.is_error,
+                        result: ci.result,
+                        session_id: ci.session_id,
+                        usage: ci.usage.map(|u| crate::session::CursorUsage {
+                            input_tokens: u.input_tokens,
+                            output_tokens: u.output_tokens,
+                            cache_read_tokens: u.cache_read_input_tokens,
+                            cache_write_tokens: u.cache_creation_input_tokens,
+                        }),
+                    });
+                    return Ok((clean_commit_message(&content), cursor_compat));
+                }
+                Ok(Err(err)) => {
+                    let err_msg = err.to_string();
+                    // Handle stale session: clear session_id and retry immediately
+                    if err_msg.contains("__stale_session__") {
+                        eprintln!("⚠ Stale claude-internal session detected, retrying without --resume");
+                        effective_session_id = None;
+                        continue;
+                    }
+                    let retryable = is_retryable_error(&err);
+                    if retryable && attempt < LLM_MAX_RETRIES {
+                        sleep(backoff_for_attempt(attempt)).await;
+                        continue;
+                    }
+                    if retryable {
+                        bail!(
+                            "{} (retried {} times)",
+                            strip_retry_prefix(&err.to_string()),
+                            LLM_MAX_RETRIES
+                        );
+                    }
+                    return Err(err);
+                }
+                Err(_) => {
+                    if attempt < LLM_MAX_RETRIES {
+                        sleep(backoff_for_attempt(attempt)).await;
+                        continue;
+                    }
+                    bail!(
+                        "LLM request timed out after {} seconds (retried {} times)",
+                        LLM_TIMEOUT_SECS,
+                        LLM_MAX_RETRIES
+                    );
+                }
+            }
+        }
+        bail!("LLM request failed unexpectedly")
+    } else if !config.provider.uses_cursor_cli() {
         let msg = generate_commit_message(config, system_prompt, user_prompt).await?;
         return Ok((msg, None));
     }
@@ -618,6 +697,132 @@ fn cursor_cli_kind_from_bin_path(path: &str) -> CursorCliKind {
         "cursor-agent" | "agent" => CursorCliKind::AgentCli,
         _ => CursorCliKind::Desktop,
     }
+}
+
+// --- Claude Internal CLI ---
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[allow(dead_code)]
+pub struct ClaudeInternalJsonResponse {
+    #[serde(rename = "type")]
+    pub resp_type: Option<String>,
+    pub subtype: Option<String>,
+    pub is_error: Option<bool>,
+    pub result: Option<String>,
+    pub session_id: Option<String>,
+    pub usage: Option<ClaudeInternalUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[allow(dead_code)]
+pub struct ClaudeInternalUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+}
+
+async fn call_claude_internal(
+    system_prompt: &str,
+    user_prompt: &str,
+    session_id: Option<&str>,
+) -> Result<(String, Option<ClaudeInternalJsonResponse>)> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    let ci_bin = find_claude_internal_cli()?;
+
+    let prompt = format!(
+        "{}\n\n---\n\n{}\n\nIMPORTANT: Output ONLY the raw commit message. No explanations, no markdown fences, no extra text.",
+        system_prompt, user_prompt
+    );
+
+    let mut command = Command::new(&ci_bin);
+    command.kill_on_drop(true);
+    command.args([
+        "-p", &prompt,
+        "--output-format", "json",
+        "--tools", "",
+    ]);
+    if let Some(sid) = session_id {
+        command.args(["--resume", sid]);
+    }
+
+    let output = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to launch claude-internal CLI at '{}'", ci_bin))?
+        .wait_with_output()
+        .await
+        .context("claude-internal process failed")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Signal stale session so the caller can clear session_id and retry
+        if session_id.is_some() && stderr.contains("No conversation found with session ID") {
+            bail!("__stale_session__:claude-internal session expired");
+        }
+
+        bail!("claude-internal exited with {}: {stderr}", output.status);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        bail!("claude-internal returned empty output");
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<ClaudeInternalJsonResponse>(&stdout) {
+        if parsed.is_error == Some(true) {
+            let msg = parsed.result.as_deref().unwrap_or("unknown error");
+            bail!("__retryable__:claude-internal error: {msg}");
+        }
+        let text = parsed.result.clone().unwrap_or_default();
+        if text.is_empty() {
+            bail!("claude-internal returned empty result in JSON response");
+        }
+        return Ok((text, Some(parsed)));
+    }
+
+    // Fallback: treat stdout as plain text
+    Ok((stdout, None))
+}
+
+fn find_claude_internal_cli() -> Result<String> {
+    if let Ok(path) = std::env::var("CURGIT_CLAUDE_INTERNAL_CLI") {
+        let path = path.trim().to_string();
+        if !path.is_empty() {
+            if !std::path::Path::new(&path).exists() {
+                bail!("CURGIT_CLAUDE_INTERNAL_CLI points to '{path}', which does not exist");
+            }
+            return Ok(path);
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("which")
+        .arg("claude-internal")
+        .output()
+    {
+        if output.status.success() {
+            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !p.is_empty() {
+                return Ok(p);
+            }
+        }
+    }
+
+    bail!(
+        "claude-internal CLI not found.\n  \
+         - Ensure 'claude-internal' is in your PATH\n  \
+         - Or set CURGIT_CLAUDE_INTERNAL_CLI to the binary path\n  \
+         - Or switch to another provider: curgit --provider cursor"
+    );
 }
 
 async fn call_openai_compatible(
